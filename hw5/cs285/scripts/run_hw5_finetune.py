@@ -49,7 +49,8 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
     observation = None
 
     # Replay buffer
-    replay_buffer = ReplayBuffer(capacity=config["total_steps"])
+    with open(os.path.join(args.dataset_dir, f"{config['dataset_name']}.pkl"), "rb") as f:
+        replay_buffer = pickle.load(f)
 
     observation = env.reset()
 
@@ -60,7 +61,28 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
 
     for step in tqdm.trange(config["total_steps"], dynamic_ncols=True):
         # TODO(student): Borrow code from another online training script here. Only run the online training loop after `num_offline_steps` steps.
+        epsilon = None
+        if step >= num_offline_steps:
+            epsilon = exploration_schedule.value(step - num_offline_steps)
+            with torch.no_grad():
+                action = agent.get_action(observation, epsilon)
+            # Step the environment and add the data to the replay buffer
+            next_observation, reward, done, info = env.step(action)
+            recent_observations.append(observation)
+            replay_buffer.insert(
+                observation=observation,
+                action=action,
+                reward=reward,
+                next_observation=next_observation,
+                done=done and not info.get("TimeLimit.truncated", False),
+            )
 
+            if done:
+                logger.log_scalar(info["episode"]["r"], "train_return", step)
+                logger.log_scalar(info["episode"]["l"], "train_ep_len", step)
+                observation = env.reset()
+            else:
+                observation = next_observation
         # Main training loop
         batch = replay_buffer.sample(config["batch_size"])
 
@@ -107,7 +129,7 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
                 logger.log_scalar(np.max(ep_lens), "eval/ep_len_max", step)
                 logger.log_scalar(np.min(ep_lens), "eval/ep_len_min", step)
 
-        if step % args.visualize_interval == 0:
+        if step % args.visualize_interval == 0 and step >= num_offline_steps:
             env_pointmass: Pointmass = env.unwrapped
             observations = np.stack(recent_observations)
             recent_observations = []
@@ -129,7 +151,7 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
         env_pointmass, agent, replay_buffer.observations[: config["total_steps"]]
     )
     fig.suptitle("State coverage")
-    filename = os.path.join("exploration", f"{config['log_name']}.png")
+    filename = os.path.join("exploration_visualization", f"{config['log_name']}.png")
     fig.savefig(filename)
     print("Saved final heatmap to", filename)
 
